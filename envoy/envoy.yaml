@@ -1,0 +1,172 @@
+admin:
+  address:
+    socket_address:
+      address: 0.0.0.0
+      port_value: 8001
+
+static_resources:
+  listeners:
+  - name: listener_0
+    address:
+      socket_address:
+        address: 0.0.0.0
+        port_value: 8080
+    filter_chains:
+    - filters:
+      - name: envoy.filters.network.http_connection_manager
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+          stat_prefix: ingress_http
+          common_http_protocol_options:
+            max_headers_count: 200
+          route_config:
+            name: local_route
+            virtual_hosts:
+            - name: local_service
+              domains: ["*"]
+              routes:
+              - match:
+                  path: "/v1/chat/completions"
+                  headers:
+                  - name: "x-llm-provider"
+                    exact_match: "openai"
+                route:
+                  cluster: openai
+                  prefix_rewrite: "/openai/v1/chat/completions"
+                  internal_redirect_policy:
+                    max_internal_redirects: 1
+                    redirect_response_codes: [307]
+                    predicates:
+                    - name: envoy.internal_redirect_predicates.previous_routes
+                      typed_config:
+                        "@type": type.googleapis.com/envoy.extensions.internal_redirect.previous_routes.v3.PreviousRoutesConfig
+              - match:
+                  path: "/v1/chat/completions"
+                  headers:
+                  - name: "x-llm-provider"
+                    exact_match: "anthropic"
+                route:
+                  cluster: anthropic
+                  prefix_rewrite: "/anthropic/v1/messages"
+                  internal_redirect_policy:
+                    max_internal_redirects: 1
+                    redirect_response_codes: [307]
+                    predicates:
+                    - name: envoy.internal_redirect_predicates.previous_routes
+                      typed_config:
+                        "@type": type.googleapis.com/envoy.extensions.internal_redirect.previous_routes.v3.PreviousRoutesConfig
+              - match:
+                  path: "/v1/messages"
+                  headers:
+                  - name: "x-llm-provider"
+                    exact_match: "anthropic"
+                route:
+                  cluster: anthropic
+                  prefix_rewrite: "/anthropic/v1/messages"
+                  internal_redirect_policy:
+                    max_internal_redirects: 1
+                    redirect_response_codes: [307]
+                    predicates:
+                    - name: envoy.internal_redirect_predicates.previous_routes
+                      typed_config:
+                        "@type": type.googleapis.com/envoy.extensions.internal_redirect.previous_routes.v3.PreviousRoutesConfig
+              - match:
+                  path: "/v1/messages"
+                  headers:
+                  - name: "x-llm-provider"
+                    exact_match: "openai"
+                route:
+                  cluster: openai
+                  prefix_rewrite: "/openai/v1/chat/completions"
+                  internal_redirect_policy:
+                    max_internal_redirects: 1
+                    redirect_response_codes: [307]
+                    predicates:
+                    - name: envoy.internal_redirect_predicates.previous_routes
+                      typed_config:
+                        "@type": type.googleapis.com/envoy.extensions.internal_redirect.previous_routes.v3.PreviousRoutesConfig
+              # Fallback/default routes (used before ext_proc mutations occur or if header is missing)
+              - match:
+                  path: "/v1/chat/completions"
+                route:
+                  cluster: openai
+                  prefix_rewrite: "/openai/v1/chat/completions"
+                  internal_redirect_policy:
+                    max_internal_redirects: 1
+                    redirect_response_codes: [307]
+                    predicates:
+                    - name: envoy.internal_redirect_predicates.previous_routes
+                      typed_config:
+                        "@type": type.googleapis.com/envoy.extensions.internal_redirect.previous_routes.v3.PreviousRoutesConfig
+              - match:
+                  path: "/v1/messages"
+                route:
+                  cluster: anthropic
+                  prefix_rewrite: "/anthropic/v1/messages"
+                  internal_redirect_policy:
+                    max_internal_redirects: 1
+                    redirect_response_codes: [307]
+                    predicates:
+                    - name: envoy.internal_redirect_predicates.previous_routes
+                      typed_config:
+                        "@type": type.googleapis.com/envoy.extensions.internal_redirect.previous_routes.v3.PreviousRoutesConfig
+          http_filters:
+          - name: envoy.filters.http.ext_proc
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExternalProcessor
+              failure_mode_allow: false
+              async_mode: false
+              processing_mode:
+                request_header_mode: SEND
+                response_header_mode: SEND
+              grpc_service:
+                envoy_grpc:
+                  cluster_name: sidecar
+          - name: envoy.filters.http.router
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+
+  clusters:
+  - name: sidecar
+    type: STRICT_DNS
+    lb_policy: ROUND_ROBIN
+    typed_extension_protocol_options:
+      envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+        "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+        explicit_http_config:
+          http2_protocol_options: {}
+    load_assignment:
+      cluster_name: sidecar
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address:
+              socket_address:
+                address: sidecar
+                port_value: 50051
+
+  - name: openai
+    type: STRICT_DNS
+    lb_policy: ROUND_ROBIN
+    load_assignment:
+      cluster_name: openai
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address:
+              socket_address:
+                address: mock-server
+                port_value: 8081
+
+  - name: anthropic
+    type: STRICT_DNS
+    lb_policy: ROUND_ROBIN
+    load_assignment:
+      cluster_name: anthropic
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address:
+              socket_address:
+                address: mock-server
+                port_value: 8081

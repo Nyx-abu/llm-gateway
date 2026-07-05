@@ -1,0 +1,21 @@
+{
+  "name": "llm-gateway-e2e",
+  "version": "1.0.0",
+  "description": "End-to-End Playwright test suite for Envoy routing & fallback",
+  "main": "index.js",
+  "scripts": {
+    "test:e2e": "playwright test",
+    "test:e2e:tier1": "playwright test tests/e2e/specs/tier1_happy_path.spec.ts",
+    "test:e2e:tier2": "playwright test tests/e2e/specs/tier2_boundary.spec.ts",
+    "test:e2e:tier3": "playwright test tests/e2e/specs/tier3_cross.spec.ts",
+    "test:e2e:tier4": "playwright test tests/e2e/specs/tier4_workloads.spec.ts",
+    "test:e2e:ui": "playwright test --ui",
+    "test:e2e:debug": "playwright test --debug",
+    "test:e2e:report": "playwright show-report"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.45.0",
+    "@types/node": "^20.14.0",
+    "typescript": "^5.4.5"
+  }
+}

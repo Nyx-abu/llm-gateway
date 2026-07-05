@@ -1,0 +1,44 @@
+# Dependencies
+node_modules/
+
+# Playwright output
+playwright-report/
+test-results/
+blob-report/
+playwright/.cache/
+
+# Coverage and reports
+coverage/
+*.coverprofile
+coverage.txt
+
+# Build output
+bin/
+build/
+dist/
+out/
+*.out
+*.test
+*.exe
+
+# Runtime and logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Local automation and agent state
+.agents/
+.codex/
+
+# Editor and OS noise
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

@@ -2,7 +2,7 @@
 
 <h1>llm-gateway</h1>
 
-<p><strong>Envoy-powered LLM traffic gateway with dynamic provider routing, transparent fallback, and an end-to-end local test rig.</strong></p>
+<p><strong>A local LLM API gateway that can choose the right provider, retry on another provider when one fails, and prove the behavior with tests.</strong></p>
 
 <p>
   <img alt="Go 1.22" src="https://img.shields.io/badge/Go-1.22-00ADD8?style=for-the-badge&logo=go&logoColor=white">
@@ -13,11 +13,12 @@
 </p>
 
 <p>
-  <a href="#about">About</a> .
-  <a href="#architecture">Architecture</a> .
-  <a href="#quick-start">Quick Start</a> .
-  <a href="#routing-and-fallback">Routing</a> .
-  <a href="#testing">Testing</a> .
+  <a href="#about">About</a> |
+  <a href="#the-short-version">Short Version</a> |
+  <a href="#how-it-works">How It Works</a> |
+  <a href="#deep-dive">Deep Dive</a> |
+  <a href="#quick-start">Quick Start</a> |
+  <a href="#testing">Testing</a> |
   <a href="#tags">Tags</a>
 </p>
 
@@ -27,44 +28,185 @@
 
 ## About
 
-`llm-gateway` is a local-first reference gateway for routing LLM API traffic across OpenAI-style and Anthropic-style interfaces. Envoy acts as the data plane, while a Go `ext_proc` sidecar inspects request headers, sets routing metadata, and turns upstream `5xx` failures into controlled internal fallback redirects.
+`llm-gateway` is a small but realistic gateway for LLM traffic.
 
-The repository also includes a mock upstream server and a Playwright API test suite, so routing and failure behavior can be exercised without real provider credentials or external API calls.
+You send one request to the gateway. The gateway looks at the model you asked for, decides which provider should handle it, sends the request there, and can fall back to the other provider if the first one fails.
 
-## Why It Exists
+In this repo, the "providers" are local mock services. That means you can test routing, failures, retries, and edge cases without real API keys, real bills, or real outages.
 
-LLM applications increasingly need provider portability, deterministic fallback behavior, and testable edge handling. This project demonstrates that shape with infrastructure components that are close to production patterns:
+## The Short Version
 
-| Capability | What this project provides |
+Think of this project as a smart front door for LLM APIs.
+
+| If you are... | Read this as... |
 | --- | --- |
-| Provider selection | Routes by `x-model`, endpoint path, and fallback state. |
-| Fallback control | Converts primary `5xx` responses into Envoy internal redirects. |
-| Loop protection | Marks fallback requests so failed fallback traffic does not redirect forever. |
-| Local determinism | Uses a mock OpenAI/Anthropic upstream with injectable failures. |
-| Test coverage | Splits E2E tests into happy path, boundary, cross-feature, and workload tiers. |
+| New to gateways | A single API entrypoint that sends each request to the right backend. |
+| Building an AI product | A pattern for provider fallback, model routing, and failure testing. |
+| An infrastructure engineer | Envoy with a Go `ext_proc` sidecar that mutates headers and uses internal redirects for fallback. |
+| Testing reliability | A controlled lab where upstreams can return `500`, delay, drop connections, or send malformed JSON. |
 
-## Architecture
+### What problem does it solve?
+
+LLM apps often talk to more than one provider. That creates practical questions:
+
+| Question | What this gateway demonstrates |
+| --- | --- |
+| Which provider should handle this model? | Route by `x-model`, endpoint path, and fallback state. |
+| What happens if the primary provider fails? | Convert `5xx` responses into a controlled fallback request. |
+| How do we avoid retry loops? | Mark fallback requests and allow only one internal redirect. |
+| How can we test failure behavior locally? | Use a mock upstream with fault-injection headers. |
+| How can we prove it works? | Run unit tests and Playwright E2E tests against the full stack. |
+
+## System At A Glance
 
 ```mermaid
 flowchart LR
-  client["Client\nOpenAI or Anthropic API shape"] --> envoy["Envoy Proxy\n:8080"]
-  envoy <-->|"gRPC ext_proc\nrequest/response headers"| sidecar["Go ext_proc Sidecar\n:50051"]
-  envoy -->|"OpenAI route\n/openai/v1/chat/completions"| mock["Mock Upstream Server\n:8081"]
-  envoy -->|"Anthropic route\n/anthropic/v1/messages"| mock
-  sidecar -->|"sets x-llm-provider\nand fallback headers"| envoy
-  mock -->|"injectable 5xx, delay,\nconnection drop, corrupt body"| envoy
-  envoy -->|"single internal 307 fallback\nwhen primary returns 5xx"| envoy
+  user["App or API Client"] -->|"POST /v1/chat/completions\nor POST /v1/messages"| envoy["Envoy Gateway\nlocalhost:8080"]
+  envoy <-->|"Ask: how should\nthis request be handled?"| sidecar["Go ext_proc Sidecar\nlocalhost:50051"]
+  envoy -->|"OpenAI-style route"| openai["Mock OpenAI Backend\nlocalhost:8081"]
+  envoy -->|"Anthropic-style route"| anthropic["Mock Anthropic Backend\nlocalhost:8081"]
+  openai --> envoy
+  anthropic --> envoy
+  envoy --> user
 ```
 
-### Components
+The gateway has three moving parts:
 
-| Component | Path | Responsibility |
+| Part | Plain-English role | Technical role |
 | --- | --- | --- |
-| Envoy proxy | `envoy/envoy.yaml` | HTTP entrypoint, provider routes, cluster definitions, `ext_proc` filter, internal redirect policy. |
-| Go sidecar | `pkg/extproc/server.go`, `cmd/sidecar/main.go` | Envoy External Processing server that mutates headers and triggers fallback redirects. |
-| Mock upstream | `cmd/mock-server/main.go` | Local OpenAI and Anthropic response simulator with failure injection controls. |
-| Docker stack | `docker-compose.yaml`, `docker/*.Dockerfile` | Runs Envoy, sidecar, and mock upstream on a shared bridge network. |
-| E2E tests | `tests/e2e/` | Playwright API tests against the gateway entrypoint. |
+| Envoy | The traffic router | HTTP proxy, route matcher, `ext_proc` caller, internal redirect executor |
+| Go sidecar | The decision helper | gRPC external processor that reads and mutates headers |
+| Mock server | The fake provider lab | Local OpenAI/Anthropic simulator with fault injection |
+
+## How It Works
+
+### 1. Normal request flow
+
+```mermaid
+sequenceDiagram
+  participant Client
+  participant Envoy
+  participant Sidecar as Go ext_proc sidecar
+  participant Provider as Mock provider
+
+  Client->>Envoy: Request with x-model: gpt-4o
+  Envoy->>Sidecar: Request headers
+  Sidecar-->>Envoy: Set x-llm-provider: openai
+  Envoy->>Provider: Forward to OpenAI mock route
+  Provider-->>Envoy: 200 response
+  Envoy-->>Client: Return provider response
+```
+
+The sidecar does not generate LLM answers. It only helps Envoy decide where the request should go.
+
+### 2. Fallback request flow
+
+```mermaid
+sequenceDiagram
+  participant Client
+  participant Envoy
+  participant Sidecar as Go ext_proc sidecar
+  participant Primary as Primary mock provider
+  participant Fallback as Fallback mock provider
+
+  Client->>Envoy: Request with x-model: gpt-4o
+  Envoy->>Sidecar: Request headers
+  Sidecar-->>Envoy: Route to OpenAI
+  Envoy->>Primary: Send request
+  Primary-->>Envoy: 500 response
+  Envoy->>Sidecar: Response headers
+  Sidecar-->>Envoy: Change status to 307 and set fallback location
+  Envoy->>Fallback: Internal redirect to Anthropic route
+  Fallback-->>Envoy: 200 response
+  Envoy-->>Client: Return fallback response
+```
+
+From the client's point of view, this still feels like one request. Envoy handles the fallback internally.
+
+### 3. Provider decision table
+
+| Request signal | Provider selected |
+| --- | --- |
+| `x-model: gpt-4o` | OpenAI mock |
+| `x-model: gpt-4-turbo` | OpenAI mock |
+| `x-model: o1-mini` | OpenAI mock |
+| `x-model: claude-3-5-sonnet` | Anthropic mock |
+| `POST /v1/chat/completions` with no known model | OpenAI mock |
+| `POST /v1/messages` with no known model | Anthropic mock |
+| `/v1/messages?fallback=true` | Anthropic mock |
+| `/v1/chat/completions?fallback=true` | OpenAI mock |
+
+### 4. Failure behavior
+
+| Upstream result | Gateway behavior |
+| --- | --- |
+| `2xx` | Return the response normally. |
+| `4xx` | Return the response normally. Client or request problem, not a provider outage. |
+| Primary `5xx` | Try the fallback provider through an Envoy internal redirect. |
+| Fallback `5xx` | Return the failure. Do not retry forever. |
+
+## Deep Dive
+
+This section is for people who want to understand the internals.
+
+### Why Envoy?
+
+Envoy is doing the heavy traffic work:
+
+- Listening on `localhost:8080`
+- Matching public API paths like `/v1/chat/completions` and `/v1/messages`
+- Calling the external processing sidecar before routing
+- Re-checking routes after the sidecar adds headers
+- Rewriting paths to the mock upstream routes
+- Performing one internal redirect when fallback is needed
+
+The key point: Envoy stays the data plane. The Go sidecar makes small decisions, but Envoy still owns routing.
+
+### Why a Go `ext_proc` sidecar?
+
+Envoy's External Processing API lets a separate service inspect request and response metadata over gRPC.
+
+In this project, the sidecar watches two phases:
+
+| Phase | What the sidecar reads | What it changes |
+| --- | --- | --- |
+| Request headers | `:path`, `x-model`, fallback markers | Sets `x-llm-provider`; sometimes normalizes `x-model` |
+| Response headers | `:status` | Turns primary `5xx` into `307` plus `location` for fallback |
+
+The sidecar lives in `pkg/extproc/server.go`.
+
+### Why clear Envoy's route cache?
+
+Envoy chooses a route early. But this gateway needs the sidecar to add `x-llm-provider` first.
+
+So after the sidecar mutates request headers, it asks Envoy to clear the route cache. Envoy then evaluates routes again, now with the new provider header available.
+
+Without that step, Envoy could keep using the first route it picked before the sidecar made its decision.
+
+### Why use a `307` for fallback?
+
+The sidecar does not directly call the fallback provider. Instead, it changes a failed primary response into:
+
+```text
+:status: 307
+location: /v1/messages?fallback=true
+```
+
+Envoy sees that `307`, treats it as an internal redirect, and sends the request to the fallback route.
+
+This keeps fallback inside the proxy layer instead of making the sidecar become a second HTTP client.
+
+### How retry loops are avoided
+
+Fallback requests include a marker:
+
+```text
+fallback=true
+```
+
+The sidecar checks for that marker. If a request is already a fallback request and the fallback provider also fails, the sidecar does not create another redirect.
+
+That keeps one bad upstream from turning into an infinite request loop.
 
 ## Quick Start
 
@@ -72,9 +214,9 @@ flowchart LR
 
 - Docker or Docker Desktop with Compose support
 - Node.js 20+ and npm
-- Go 1.22+ if running Go unit tests directly on the host
+- Go 1.22+ if you want to run Go unit tests directly on your machine
 
-### Run the full local stack
+### Run the local stack
 
 ```bash
 npm ci
@@ -83,9 +225,9 @@ npm run test:e2e
 docker compose down -v
 ```
 
-If your environment still uses the standalone Compose binary, replace `docker compose` with `docker-compose`.
+If your environment still uses the older Compose binary, use `docker-compose` instead of `docker compose`.
 
-### Smoke test the OpenAI-compatible route
+### Try the OpenAI-style route
 
 ```bash
 curl -i http://localhost:8080/v1/chat/completions \
@@ -95,7 +237,7 @@ curl -i http://localhost:8080/v1/chat/completions \
   -d '{"model":"gpt-4o","messages":[{"role":"user","content":"hello"}]}'
 ```
 
-### Smoke test the Anthropic-compatible route
+### Try the Anthropic-style route
 
 ```bash
 curl -i http://localhost:8080/v1/messages \
@@ -105,7 +247,7 @@ curl -i http://localhost:8080/v1/messages \
   -d '{"model":"claude-3-5-sonnet","messages":[{"role":"user","content":"hello"}]}'
 ```
 
-### Force primary-provider fallback
+### Force fallback
 
 ```bash
 curl -i http://localhost:8080/v1/chat/completions \
@@ -116,40 +258,19 @@ curl -i http://localhost:8080/v1/chat/completions \
   -d '{"model":"gpt-4o","messages":[{"role":"user","content":"force fallback"}]}'
 ```
 
-All upstream responses are local mocks. No real OpenAI or Anthropic request is made.
+No real OpenAI or Anthropic request is made. Everything runs against local mocks.
 
-## Routing And Fallback
+## Failure Lab
 
-### Provider selection
+Use these headers to make the mock providers misbehave on purpose.
 
-| Input | Provider decision |
+| Header | What it does |
 | --- | --- |
-| `x-model` starts with `gpt` | OpenAI mock route |
-| `x-model` starts with `o1` | OpenAI mock route |
-| `x-model` starts with `claude` | Anthropic mock route |
-| Missing or unknown model on `/v1/chat/completions` | OpenAI mock route |
-| Missing or unknown model on `/v1/messages` | Anthropic mock route |
-| Fallback request to `/v1/messages?fallback=true` | Anthropic mock route |
-| Fallback request to `/v1/chat/completions?fallback=true` | OpenAI mock route |
-
-### Failure behavior
-
-| Upstream result | Gateway behavior |
-| --- | --- |
-| `2xx` | Response passes through. |
-| `4xx` | Response passes through by default. |
-| Primary `5xx` | Sidecar mutates response to `307` with a fallback `location`; Envoy handles it as an internal redirect. |
-| Fallback `5xx` | Response is returned without another redirect, preventing loops. |
-
-### Failure injection headers
-
-| Header | Effect |
-| --- | --- |
-| `x-inject-error: true` | Forces a generic `500` from the active mock provider. |
-| `x-inject-openai-status: 500` | Forces a specific OpenAI mock status. |
-| `x-inject-anthropic-status: 503` | Forces a specific Anthropic mock status. |
-| `x-inject-status: 429` | Forces a generic mock status. |
-| `x-inject-delay: 5000` | Sleeps before responding. |
+| `x-inject-error: true` | Forces a generic `500`. |
+| `x-inject-openai-status: 500` | Forces the OpenAI mock to return that status. |
+| `x-inject-anthropic-status: 503` | Forces the Anthropic mock to return that status. |
+| `x-inject-status: 429` | Forces a generic status from the active provider. |
+| `x-inject-delay: 5000` | Waits before responding. |
 | `x-inject-openai-delay-ms: 5000` | Delays only OpenAI mock handling. |
 | `x-inject-anthropic-delay-ms: 5000` | Delays only Anthropic mock handling. |
 | `x-inject-connection-drop: true` | Drops the upstream TCP connection. |
@@ -163,7 +284,7 @@ All upstream responses are local mocks. No real OpenAI or Anthropic request is m
 go test ./...
 ```
 
-The unit suite covers mock upstream handlers and `ext_proc` routing/fallback decisions.
+These tests cover the mock handlers and the sidecar's routing/fallback decisions.
 
 ### Playwright E2E tests
 
@@ -175,14 +296,14 @@ npm run test:e2e:tier3
 npm run test:e2e:tier4
 ```
 
-| Tier | Focus | Coverage |
+| Tier | What it checks | Cases |
 | --- | --- | --- |
-| Tier 1 | Happy path model routing | 18 cases |
-| Tier 2 | Boundary and corner cases | 18 cases |
-| Tier 3 | Cross-feature fallback combinations | 5 cases |
-| Tier 4 | Real-world workload simulations | 7 workloads |
+| Tier 1 | Normal model routing | 18 |
+| Tier 2 | Missing headers, bad inputs, upstream failures | 18 |
+| Tier 3 | Combined routing and fallback scenarios | 5 |
+| Tier 4 | Heavier real-world workload patterns | 7 |
 
-Playwright targets `http://localhost:8080` by default. Override it with:
+By default, Playwright targets `http://localhost:8080`. Override it with:
 
 ```bash
 GATEWAY_URL=http://localhost:8080 npm run test:e2e
@@ -204,27 +325,22 @@ GATEWAY_URL=http://localhost:8080 npm run test:e2e
 |   `-- e2e/                # Playwright API tests and gateway client helper
 |-- docker-compose.yaml     # Local three-service stack
 |-- go.mod                  # Go module definition
-|-- package.json            # Playwright runner scripts
-|-- PROJECT.md              # Project architecture and milestone notes
+|-- package.json            # Playwright scripts
+|-- PROJECT.md              # Architecture and milestone notes
 |-- TEST_INFRA.md           # E2E infrastructure details
 `-- TEST_READY.md           # Test readiness checklist
 ```
 
-## Operational Notes
+## Ports
 
-| Port | Service |
-| --- | --- |
-| `8080` | Envoy client entrypoint |
-| `8001` | Envoy admin interface |
-| `50051` | Go `ext_proc` sidecar gRPC server |
-| `8081` | Mock upstream HTTP server |
+| Port | Service | Purpose |
+| --- | --- | --- |
+| `8080` | Envoy | Public gateway entrypoint |
+| `8001` | Envoy admin | Envoy diagnostics and admin API |
+| `50051` | Go sidecar | gRPC `ext_proc` service |
+| `8081` | Mock server | Local OpenAI/Anthropic-style upstreams |
 
-- The mock server does not validate real API keys.
-- Authorization headers are forwarded for testing but not authenticated.
-- The fallback mechanism is intentionally scoped to `5xx` responses.
-- Docker must be running before the Compose stack or E2E tests can validate the full gateway path.
-
-## Roadmap
+## Current Status
 
 | Milestone | Status |
 | --- | --- |
@@ -235,6 +351,14 @@ GATEWAY_URL=http://localhost:8080 npm run test:e2e
 | Local Docker integration | Done |
 | End-to-end validation | In progress |
 | Adversarial hardening | Planned |
+
+## Notes And Limits
+
+- This is a local test gateway, not a production billing/auth system.
+- The mock server does not validate real API keys.
+- The fallback behavior is intentionally scoped to `5xx` provider failures.
+- `4xx` responses generally pass through because they usually mean the request needs fixing.
+- Docker must be running before the full E2E path can be tested.
 
 ## Tags
 

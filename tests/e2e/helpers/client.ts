@@ -32,7 +32,7 @@ export class GatewayClient {
         headers['Authorization'] = opts.authHeader;
       }
     } else {
-      headers['Authorization'] = 'Bearer default-openai-token';
+      headers['Authorization'] = 'Bearer test-client-key';
     }
 
     const body = opts.body !== undefined ? opts.body : {
@@ -62,7 +62,7 @@ export class GatewayClient {
         headers['Authorization'] = opts.authHeader;
       }
     } else {
-      headers['Authorization'] = 'Bearer default-anthropic-token';
+      headers['Authorization'] = 'Bearer test-client-key';
     }
 
     const body = opts.body !== undefined ? opts.body : {
@@ -92,7 +92,7 @@ export class GatewayClient {
         headers['Authorization'] = opts.authHeader;
       }
     } else if (headers['Authorization'] === undefined && opts.authHeader === undefined) {
-      headers['Authorization'] = 'Bearer default-token';
+      headers['Authorization'] = 'Bearer test-client-key';
     }
 
     return await this.request[method.toLowerCase() as 'get' | 'post' | 'put' | 'delete'](`${this.baseURL}${path}`, {

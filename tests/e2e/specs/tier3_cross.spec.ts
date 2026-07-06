@@ -69,7 +69,7 @@ test.describe('Tier 3: Cross-Feature Combination Cases', () => {
   });
 
   test('Case 3.4: Authorization Header Preservation across Fallback', async () => {
-    const authHeader = 'Bearer test-key-999';
+    const authHeader = 'Bearer test-client-key';
     const res = await client.sendOpenAIRequest({
       model: 'gpt-4o',
       authHeader,

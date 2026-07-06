@@ -163,6 +163,11 @@ func handleInjection(w http.ResponseWriter, r *http.Request, provider string) (i
 
 // handleOpenAICompletions serves mock OpenAI completions.
 func handleOpenAICompletions(w http.ResponseWriter, r *http.Request) {
+	log.Printf("Mock Server received request to %s", r.URL.Path)
+	for k, v := range r.Header {
+		log.Printf("  Header: %s = %s", k, v)
+	}
+
 	if r.Method != http.MethodPost {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusMethodNotAllowed)

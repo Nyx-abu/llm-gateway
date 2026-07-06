@@ -36,6 +36,18 @@ pnpm-debug.log*
 # Local automation and agent state
 .agents/
 .codex/
+scratch/
+*.json
+!package.json
+!package-lock.json
+!tsconfig.json
+!go.mod
+!go.sum
+screenshot.js
+ui_analysis.js
+ui_dom.html
+ui_styles.json
+*.png
 
 # Editor and OS noise
 .idea/

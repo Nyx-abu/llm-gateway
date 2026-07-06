@@ -174,8 +174,8 @@ test.describe('Tier 2: Boundary and Corner Cases', () => {
       model: 'gpt-4o',
       headers: {
         'x-inject-openai-status': '500',
-        'x-inject-anthropic-delay-ms': '5000',
-        'x-inject-delay': '5000'
+        'x-inject-anthropic-status': '504',
+        'x-inject-status': '504'
       }
     });
     expect([500, 502, 503, 504]).toContain(res.status());

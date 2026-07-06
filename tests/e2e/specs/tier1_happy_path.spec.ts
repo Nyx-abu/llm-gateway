@@ -191,8 +191,8 @@ test.describe('Tier 1: Happy Path Model Routing', () => {
     }
   });
 
-  test('TC-T1-16: Authentication forwarding to OpenAI', async () => {
-    const authHeader = 'Bearer my-secret-openai-token';
+  test('TC-T1-16: Authentication replacement to OpenAI', async () => {
+    const authHeader = 'Bearer test-client-key';
     const res = await client.sendOpenAIRequest({ model: 'gpt-4o', authHeader });
     expect(res.status()).toBe(200);
     const body = await res.json();
@@ -207,12 +207,12 @@ test.describe('Tier 1: Happy Path Model Routing', () => {
       body.headers?.Authorization;
       
     if (echoedAuth) {
-      expect(echoedAuth).toBe(authHeader);
+      expect(echoedAuth).toBe('Bearer sk-real-openai');
     }
   });
 
-  test('TC-T1-17: Authentication forwarding to Anthropic', async () => {
-    const authHeader = 'Bearer my-secret-anthropic-token';
+  test('TC-T1-17: Authentication replacement to Anthropic', async () => {
+    const authHeader = 'Bearer test-client-key';
     const res = await client.sendAnthropicRequest({ model: 'claude-3-5-sonnet', authHeader });
     expect(res.status()).toBe(200);
     const body = await res.json();
@@ -226,7 +226,7 @@ test.describe('Tier 1: Happy Path Model Routing', () => {
       body.headers?.Authorization;
 
     if (echoedAuth) {
-      expect(echoedAuth).toBe(authHeader);
+      expect(echoedAuth).toBe('Bearer sk-real-anthropic');
     }
   });
 

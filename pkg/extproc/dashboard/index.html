@@ -1,0 +1,427 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LLM Gateway - Enterprise Control Panel</title>
+    <style>
+        /* Strict Enterprise Theme Variables */
+        :root {
+            --bg-base: #000000;
+            --bg-surface: #111111;
+            --bg-surface-alt: #1a1a1a;
+            --border-color: #333333;
+            --border-focus: #555555;
+            --text-main: #e0e0e0;
+            --text-muted: #888888;
+            --text-highlight: #ffffff;
+            --accent: #0066cc;
+            --success: #00cc66;
+            --warning: #ffaa00;
+            --error: #cc0000;
+            --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            --font-mono: "Courier New", "JetBrains Mono", Consolas, monospace;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            background-color: var(--bg-base);
+            color: var(--text-main);
+            font-family: var(--font-ui);
+            font-size: 13px;
+            line-height: 1.4;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        /* Top Navigation */
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 8px 16px;
+            background-color: var(--bg-surface);
+            border-bottom: 1px solid var(--border-color);
+            flex-shrink: 0;
+        }
+
+        .header h1 {
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--text-highlight);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .header-status {
+            display: flex;
+            gap: 16px;
+            font-family: var(--font-mono);
+            font-size: 12px;
+        }
+
+        .status-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            background-color: var(--success);
+            border-radius: 0; /* Strict 0px radius */
+        }
+
+        /* Main Workspace */
+        .workspace {
+            display: flex;
+            flex: 1;
+            overflow: hidden;
+        }
+
+        /* Left Sidebar - Metrics */
+        .sidebar {
+            width: 300px;
+            background-color: var(--bg-surface);
+            border-right: 1px solid var(--border-color);
+            display: flex;
+            flex-direction: column;
+            overflow-y: auto;
+        }
+
+        .section-header {
+            padding: 8px 12px;
+            background-color: var(--bg-surface-alt);
+            border-bottom: 1px solid var(--border-color);
+            border-top: 1px solid var(--border-color);
+            font-size: 11px;
+            font-weight: 700;
+            text-transform: uppercase;
+            color: var(--text-muted);
+            letter-spacing: 0.05em;
+            margin-top: -1px;
+        }
+
+        .metric-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 8px 12px;
+            border-bottom: 1px solid var(--border-color);
+            font-family: var(--font-mono);
+        }
+
+        .metric-label {
+            color: var(--text-muted);
+        }
+
+        .metric-val {
+            color: var(--text-highlight);
+        }
+
+        /* Main Content - Logs and Traffic */
+        .main-content {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            background-color: var(--bg-base);
+            min-width: 0;
+        }
+
+        /* Tools / Filters Bar */
+        .toolbar {
+            display: flex;
+            padding: 8px 12px;
+            border-bottom: 1px solid var(--border-color);
+            background-color: var(--bg-surface);
+            gap: 8px;
+        }
+
+        input, select, button {
+            background-color: var(--bg-base);
+            color: var(--text-main);
+            border: 1px solid var(--border-color);
+            padding: 4px 8px;
+            font-family: var(--font-ui);
+            font-size: 12px;
+            border-radius: 0; /* Strict 0px radius */
+            outline: none;
+        }
+
+        input:focus, select:focus {
+            border-color: var(--accent);
+        }
+
+        button {
+            background-color: var(--bg-surface-alt);
+            cursor: pointer;
+            font-weight: 600;
+        }
+
+        button:hover {
+            background-color: var(--border-focus);
+            color: var(--text-highlight);
+        }
+
+        /* Log Table */
+        .log-container {
+            flex: 1;
+            overflow: auto;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-family: var(--font-mono);
+            font-size: 12px;
+        }
+
+        th, td {
+            text-align: left;
+            padding: 6px 12px;
+            border-bottom: 1px solid var(--border-color);
+            border-right: 1px solid var(--border-color);
+            white-space: nowrap;
+        }
+
+        th {
+            background-color: var(--bg-surface-alt);
+            color: var(--text-muted);
+            font-weight: normal;
+            position: sticky;
+            top: 0;
+            z-index: 1;
+        }
+
+        tr:hover {
+            background-color: var(--bg-surface);
+        }
+
+        .cell-time { color: var(--text-muted); width: 180px; }
+        .cell-level { width: 60px; font-weight: bold; }
+        .cell-msg { color: var(--text-highlight); width: 400px; overflow: hidden; text-overflow: ellipsis; }
+        .cell-data { color: var(--text-muted); white-space: pre-wrap; font-size: 11px; }
+
+        .level-info { color: var(--accent); }
+        .level-warn { color: var(--warning); }
+        .level-error { color: var(--error); }
+
+        /* Badge/Tag */
+        .tag {
+            display: inline-block;
+            border: 1px solid var(--border-focus);
+            padding: 0 4px;
+            color: var(--text-muted);
+            background: var(--bg-surface);
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>LLM Gateway Control Panel</h1>
+        <div class="header-status">
+            <div class="status-item">
+                <div class="status-dot"></div>
+                SYSTEM ONLINE
+            </div>
+            <div class="status-item">
+                PORT: 8000
+            </div>
+            <div class="status-item">
+                <span id="connStatus">CONNECTED</span>
+            </div>
+        </div>
+    </div>
+
+    <div class="workspace">
+        <div class="sidebar">
+            <div class="section-header">Gateway Telemetry</div>
+            <div class="metric-row">
+                <span class="metric-label">Active Keys</span>
+                <span class="metric-val" id="activeKeysVal">0</span>
+            </div>
+            <div class="metric-row">
+                <span class="metric-label">Total Requests</span>
+                <span class="metric-val" id="totalReqVal">0</span>
+            </div>
+            <div class="metric-row">
+                <span class="metric-label">Uptime</span>
+                <span class="metric-val" id="uptimeVal">0s</span>
+            </div>
+
+            <div class="section-header">Provider Endpoints</div>
+            <div class="metric-row">
+                <span class="metric-label">OpenAI</span>
+                <span class="metric-val"><span class="tag">ROUTED</span></span>
+            </div>
+            <div class="metric-row">
+                <span class="metric-label">Anthropic</span>
+                <span class="metric-val"><span class="tag">ROUTED</span></span>
+            </div>
+            <div class="metric-row">
+                <span class="metric-label">Schema Translation</span>
+                <span class="metric-val"><span class="tag">ACTIVE</span></span>
+            </div>
+        </div>
+
+        <div class="main-content">
+            <div class="toolbar">
+                <button id="btnPause">PAUSE FEED</button>
+                <button id="btnClear">CLEAR</button>
+                <input type="text" id="filterInput" placeholder="Filter logs..." style="width: 250px;">
+                <select id="levelFilter">
+                    <option value="ALL">ALL LEVELS</option>
+                    <option value="INFO">INFO</option>
+                    <option value="WARN">WARN</option>
+                    <option value="ERROR">ERROR</option>
+                </select>
+            </div>
+            <div class="log-container">
+                <table id="logTable">
+                    <thead>
+                        <tr>
+                            <th class="cell-time">TIMESTAMP</th>
+                            <th class="cell-level">LVL</th>
+                            <th class="cell-msg">MESSAGE</th>
+                            <th class="cell-data">METADATA</th>
+                        </tr>
+                    </thead>
+                    <tbody id="logBody">
+                        <!-- Logs injected here -->
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let isPaused = false;
+        let logs = [];
+        let totalRequests = 0;
+        let uptimeSeconds = 0;
+
+        const logBody = document.getElementById('logBody');
+        const filterInput = document.getElementById('filterInput');
+        const levelFilter = document.getElementById('levelFilter');
+
+        document.getElementById('btnPause').addEventListener('click', (e) => {
+            isPaused = !isPaused;
+            e.target.textContent = isPaused ? 'RESUME FEED' : 'PAUSE FEED';
+            e.target.style.color = isPaused ? 'var(--warning)' : '';
+        });
+
+        document.getElementById('btnClear').addEventListener('click', () => {
+            logs = [];
+            renderLogs();
+        });
+
+        filterInput.addEventListener('input', renderLogs);
+        levelFilter.addEventListener('change', renderLogs);
+
+        function renderLogs() {
+            logBody.innerHTML = '';
+            const filterText = filterInput.value.toLowerCase();
+            const filterLevel = levelFilter.value;
+
+            logs.forEach(log => {
+                const lvl = (log.level || 'INFO').toUpperCase();
+                
+                if (filterLevel !== 'ALL' && lvl !== filterLevel) return;
+                
+                const msg = log.msg || '';
+                const time = log.time || new Date().toISOString();
+                
+                // Exclude time, level, msg from metadata
+                const meta = { ...log };
+                delete meta.time;
+                delete meta.level;
+                delete meta.msg;
+                
+                const metaStr = Object.keys(meta).length > 0 ? JSON.stringify(meta) : '';
+                
+                if (filterText && !msg.toLowerCase().includes(filterText) && !metaStr.toLowerCase().includes(filterText)) {
+                    return;
+                }
+
+                const tr = document.createElement('tr');
+                
+                const tdTime = document.createElement('td');
+                tdTime.className = 'cell-time';
+                tdTime.textContent = time;
+                
+                const tdLvl = document.createElement('td');
+                tdLvl.className = 'cell-level level-' + lvl.toLowerCase();
+                tdLvl.textContent = lvl;
+                
+                const tdMsg = document.createElement('td');
+                tdMsg.className = 'cell-msg';
+                tdMsg.textContent = msg;
+                
+                const tdMeta = document.createElement('td');
+                tdMeta.className = 'cell-data';
+                tdMeta.textContent = metaStr;
+                
+                tr.appendChild(tdTime);
+                tr.appendChild(tdLvl);
+                tr.appendChild(tdMsg);
+                tr.appendChild(tdMeta);
+                
+                logBody.appendChild(tr);
+            });
+            
+            // Auto scroll to bottom
+            const container = document.querySelector('.log-container');
+            container.scrollTop = container.scrollHeight;
+        }
+
+        async function fetchConfig() {
+            try {
+                const res = await fetch('/api/config');
+                const data = await res.json();
+                document.getElementById('activeKeysVal').textContent = data.active_keys || 0;
+                document.getElementById('totalReqVal').textContent = data.total_requests || 0;
+                document.getElementById('uptimeVal').textContent = (data.uptime_seconds || 0) + 's';
+            } catch (err) {
+                console.error("Config fetch failed:", err);
+            }
+        }
+
+        async function fetchLogs() {
+            if (isPaused) return;
+            try {
+                const res = await fetch('/api/logs');
+                const data = await res.json();
+                
+                let newLogs = data.logs || [];
+                // Sort by time
+                newLogs.sort((a, b) => new Date(a.time) - new Date(b.time));
+                
+                if (JSON.stringify(newLogs) !== JSON.stringify(logs)) {
+                    logs = newLogs;
+                    renderLogs();
+                }
+                
+                document.getElementById('connStatus').textContent = 'CONNECTED';
+                document.getElementById('connStatus').style.color = 'var(--success)';
+            } catch (err) {
+                console.error("Log fetch failed:", err);
+                document.getElementById('connStatus').textContent = 'DISCONNECTED';
+                document.getElementById('connStatus').style.color = 'var(--error)';
+            }
+        }
+
+        // Init
+        fetchConfig();
+        fetchLogs();
+        setInterval(fetchConfig, 1000);
+        setInterval(fetchLogs, 2000);
+    </script>
+</body>
+</html>

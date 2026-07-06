@@ -48,7 +48,7 @@ static_resources:
                     exact_match: "openai"
                 route:
                   cluster: openai
-                  prefix_rewrite: "/openai/v1/chat/completions"
+                  auto_host_rewrite: true
                   internal_redirect_policy:
                     max_internal_redirects: 1
                     redirect_response_codes: [307]
@@ -63,7 +63,7 @@ static_resources:
                     exact_match: "anthropic"
                 route:
                   cluster: anthropic
-                  prefix_rewrite: "/anthropic/v1/messages"
+                  auto_host_rewrite: true
                   internal_redirect_policy:
                     max_internal_redirects: 1
                     redirect_response_codes: [307]
@@ -78,7 +78,7 @@ static_resources:
                     exact_match: "anthropic"
                 route:
                   cluster: anthropic
-                  prefix_rewrite: "/anthropic/v1/messages"
+                  auto_host_rewrite: true
                   internal_redirect_policy:
                     max_internal_redirects: 1
                     redirect_response_codes: [307]
@@ -93,7 +93,7 @@ static_resources:
                     exact_match: "openai"
                 route:
                   cluster: openai
-                  prefix_rewrite: "/openai/v1/chat/completions"
+                  auto_host_rewrite: true
                   internal_redirect_policy:
                     max_internal_redirects: 1
                     redirect_response_codes: [307]
@@ -112,7 +112,7 @@ static_resources:
                   path: "/v1/chat/completions"
                 route:
                   cluster: openai
-                  prefix_rewrite: "/openai/v1/chat/completions"
+                  auto_host_rewrite: true
                   internal_redirect_policy:
                     max_internal_redirects: 1
                     redirect_response_codes: [307]
@@ -124,7 +124,7 @@ static_resources:
                   path: "/v1/messages"
                 route:
                   cluster: anthropic
-                  prefix_rewrite: "/anthropic/v1/messages"
+                  auto_host_rewrite: true
                   internal_redirect_policy:
                     max_internal_redirects: 1
                     redirect_response_codes: [307]
@@ -200,7 +200,8 @@ static_resources:
                 port_value: 50051
 
   - name: openai
-    type: STRICT_DNS
+    type: LOGICAL_DNS
+    dns_lookup_family: V4_ONLY
     lb_policy: ROUND_ROBIN
     load_assignment:
       cluster_name: openai
@@ -209,11 +210,17 @@ static_resources:
         - endpoint:
             address:
               socket_address:
-                address: mock-server
-                port_value: 8081
+                address: aiapiv2.pekpik.com
+                port_value: 443
+    transport_socket:
+      name: envoy.transport_sockets.tls
+      typed_config:
+        "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+        sni: aiapiv2.pekpik.com
 
   - name: anthropic
-    type: STRICT_DNS
+    type: LOGICAL_DNS
+    dns_lookup_family: V4_ONLY
     lb_policy: ROUND_ROBIN
     load_assignment:
       cluster_name: anthropic
@@ -222,8 +229,13 @@ static_resources:
         - endpoint:
             address:
               socket_address:
-                address: mock-server
-                port_value: 8081
+                address: api.anthropic.com
+                port_value: 443
+    transport_socket:
+      name: envoy.transport_sockets.tls
+      typed_config:
+        "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+        sni: api.anthropic.com
 
   - name: sidecar-http
     type: STRICT_DNS

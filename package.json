@@ -17,5 +17,14 @@
     "@playwright/test": "^1.45.0",
     "@types/node": "^20.14.0",
     "typescript": "^5.4.5"
-  }
+  },
+  "dependencies": {
+    "playwright": "^1.61.1"
+  },
+  "directories": {
+    "test": "tests"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC"
 }

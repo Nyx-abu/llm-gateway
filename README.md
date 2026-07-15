@@ -81,6 +81,12 @@ The gateway has three moving parts:
 | Go sidecar | The decision maker + auth gate | gRPC external processor that authenticates clients, injects provider keys, reads/mutates headers, triggers fallback |
 | Mock server | The fake provider lab | Local OpenAI/Anthropic simulator with fault injection |
 
+### Enterprise Control Panel
+
+The gateway includes a built-in telemetry dashboard for real-time monitoring of active keys, request volume, and live traffic logs.
+
+![Enterprise Control Panel](assets/dashboard_real.png)
+
 ## How It Works
 
 ### 1. Normal request flow

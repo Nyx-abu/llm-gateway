@@ -21,13 +21,12 @@ services:
     build:
       context: .
       dockerfile: docker/sidecar.Dockerfile
-    ports:
-      - "50051:50051"
-      - "8082:8082"
+
     environment:
       - GATEWAY_API_KEYS=${GATEWAY_API_KEYS:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - REDIS_ADDR=redis:6379
     networks:
       - llm-gateway-net
     restart: always
@@ -42,8 +41,7 @@ services:
     build:
       context: .
       dockerfile: docker/mock-server.Dockerfile
-    ports:
-      - "8081:8081"
+
     environment:
       - MOCK_SERVER_PORT=8081
     networks:
@@ -51,6 +49,18 @@ services:
     restart: always
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:8081/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  redis:
+    image: redis:7-alpine
+    networks:
+      - llm-gateway-net
+    restart: always
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
       retries: 5

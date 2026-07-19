@@ -12,7 +12,17 @@ static_resources:
         address: 0.0.0.0
         port_value: 8080
     filter_chains:
-    - filters:
+    - transport_socket:
+        name: envoy.transport_sockets.tls
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
+          common_tls_context:
+            tls_certificates:
+            - certificate_chain:
+                filename: "/etc/envoy/cert.pem"
+              private_key:
+                filename: "/etc/envoy/key.pem"
+      filters:
       - name: envoy.filters.network.http_connection_manager
         typed_config:
           "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
@@ -133,36 +143,6 @@ static_resources:
                       typed_config:
                         "@type": type.googleapis.com/envoy.extensions.internal_redirect.previous_routes.v3.PreviousRoutesConfig
           http_filters:
-          # Rate limiting: 100 requests per minute per client
-          - name: envoy.filters.http.local_ratelimit
-            typed_config:
-              "@type": type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
-              stat_prefix: http_local_rate_limiter
-              token_bucket:
-                max_tokens: 10000
-                tokens_per_fill: 10000
-                fill_interval: 60s
-              filter_enabled:
-                runtime_key: local_rate_limit_enabled
-                default_value:
-                  numerator: 100
-                  denominator: HUNDRED
-              filter_enforced:
-                runtime_key: local_rate_limit_enforced
-                default_value:
-                  numerator: 100
-                  denominator: HUNDRED
-              response_headers_to_add:
-              - append_action: OVERWRITE_IF_EXISTS_OR_ADD
-                header:
-                  key: x-ratelimit-limit
-                  value: "100"
-              - append_action: OVERWRITE_IF_EXISTS_OR_ADD
-                header:
-                  key: retry-after
-                  value: "60"
-              status:
-                code: TooManyRequests
           - name: envoy.filters.http.ext_proc
             typed_config:
               "@type": type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExternalProcessor

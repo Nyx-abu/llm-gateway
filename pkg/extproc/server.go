@@ -1,16 +1,21 @@
 package extproc
 
 import (
+	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/go-redis/redis/v8"
 	"github.com/google/uuid"
 
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
@@ -19,23 +24,12 @@ import (
 	"llm-gateway/pkg/extproc/dashboard"
 )
 
-// Server implements the Envoy ExternalProcessorServer interface.
-type Server struct {
-	extprocv3.UnimplementedExternalProcessorServer
-
-	// virtualKeyVault maps client virtual keys to metadata
-	virtualKeyVault map[string]*VirtualKey
-
-	logger *slog.Logger
-}
-
 type VirtualKey struct {
 	mu             sync.RWMutex
-	ID             string
-	AllowedModels  []string
-	MonthlyBudget  float64
-	Spend          float64
-	// In a real system, provider keys would be stored securely per virtual key or tenant
+	ID             string   `json:"id"`
+	AllowedModels  []string `json:"allowed_models"`
+	MonthlyBudget  float64  `json:"monthly_budget"`
+	Spend          float64  `json:"spend"`
 }
 
 func (vk *VirtualKey) AddSpend(amount float64) {
@@ -81,13 +75,16 @@ type AnthropicResponseUsage struct {
 	} `json:"usage"`
 }
 
+type Server struct {
+	extprocv3.UnimplementedExternalProcessorServer
+	virtualKeyVault map[string]*VirtualKey
+	logger          *slog.Logger
+	rdb             *redis.Client
+}
 
+var ssnRegex = regexp.MustCompile(`\b\d{3}-\d{2}-\d{4}\b`)
+var ccRegex = regexp.MustCompile(`\b(?:\d[ -]*?){13,16}\b`)
 
-// NewServer creates a new ext_proc server.
-// It reads configuration from environment variables:
-//   - GATEWAY_API_KEYS: comma-separated allow-list of client bearer tokens
-//   - OPENAI_API_KEY: real API key injected into OpenAI upstream requests
-//   - ANTHROPIC_API_KEY: real API key injected into Anthropic upstream requests
 func NewServer() *Server {
 	ringBuffer := dashboard.NewLogRingBuffer(100)
 	multiWriter := io.MultiWriter(os.Stdout, ringBuffer)
@@ -95,14 +92,30 @@ func NewServer() *Server {
 		Level: slog.LevelInfo,
 	}))
 
+	var rdb *redis.Client
+	redisAddr := os.Getenv("REDIS_ADDR")
+	if redisAddr != "" {
+		rdb = redis.NewClient(&redis.Options{
+			Addr: redisAddr,
+		})
+	}
+
 	s := &Server{
 		virtualKeyVault: make(map[string]*VirtualKey),
 		logger:          logger,
+		rdb:             rdb,
 	}
 
-	// Load gateway API keys from environment and map to virtual vault
-	if keys := os.Getenv("GATEWAY_API_KEYS"); keys != "" {
-		for _, k := range strings.Split(keys, ",") {
+	keysEnv := os.Getenv("GATEWAY_API_KEYS")
+	if strings.HasPrefix(strings.TrimSpace(keysEnv), "[") {
+		var keys []VirtualKey
+		if err := json.Unmarshal([]byte(keysEnv), &keys); err == nil {
+			for i := range keys {
+				s.virtualKeyVault[keys[i].ID] = &keys[i]
+			}
+		}
+	} else if keysEnv != "" {
+		for _, k := range strings.Split(keysEnv, ",") {
 			k = strings.TrimSpace(k)
 			if k != "" {
 				s.virtualKeyVault[k] = &VirtualKey{
@@ -113,10 +126,9 @@ func NewServer() *Server {
 				}
 			}
 		}
-		logger.Info("gateway auth enabled with virtual key vault", "keys_loaded", len(s.virtualKeyVault))
-	} else {
-		logger.Warn("gateway auth disabled: GATEWAY_API_KEYS is empty")
 	}
+	
+	logger.Info("gateway auth initialized", "keys_loaded", len(s.virtualKeyVault))
 
 	if k := os.Getenv("OPENAI_API_KEY"); k != "" {
 		logger.Info("openai API key loaded into vault")
@@ -130,15 +142,15 @@ func NewServer() *Server {
 	return s
 }
 
-// Process handles streaming request/response phases from Envoy.
 func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error {
 	var provider string
 	var isFallback bool
 	var requestID string
-	var startTime time.Time
 	var vk *VirtualKey
 	var model string
 	var originalPath string
+	var cacheKey string
+	ctx := context.Background()
 
 	for {
 		req, err := stream.Recv()
@@ -153,13 +165,9 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 
 		switch msg := req.Request.(type) {
 		case *extprocv3.ProcessingRequest_RequestHeaders:
-			startTime = time.Now()
-			provider = ""
-			isFallback = false
 			atomic.AddUint64(&dashboard.TotalRequests, 1)
 			headers := msg.RequestHeaders.Headers.Headers
 
-			// Extract or generate request ID for tracing
 			requestID = getHeader(headers, "x-request-id")
 			if requestID == "" {
 				requestID = uuid.New().String()
@@ -170,83 +178,68 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 			model = getHeader(headers, "x-model")
 			clientAuth := getHeader(headers, "authorization")
 
-			// Log all headers for debugging
-			var headerKeys []string
-			for _, h := range headers {
-				if h != nil {
-					headerKeys = append(headerKeys, h.Key+"="+h.Value+"|"+string(h.RawValue))
-				}
-			}
-			s.logger.Info("received headers", "request_id", requestID, "headers", strings.Join(headerKeys, ", "))
+			// Secure logging: Do not dump raw headers
+			s.logger.Info("request started", "request_id", requestID, "path", path, "model", model)
 
-
-
-			// ── Auth & Virtual Key check ─────────────────────────
+			// ── Auth & RBAC check ─────────────────────────
 			if len(s.virtualKeyVault) > 0 {
 				token := strings.TrimPrefix(clientAuth, "Bearer ")
 				token = strings.TrimPrefix(token, "bearer ")
 				vk = s.virtualKeyVault[token]
-				if token == "" || vk == nil {
-					s.logger.Warn("auth rejected",
-						"request_id", requestID,
-						"reason", "invalid_virtual_key",
-					)
-					resp.Response = &extprocv3.ProcessingResponse_ImmediateResponse{
-						ImmediateResponse: &extprocv3.ImmediateResponse{
-							Status: &typev3.HttpStatus{Code: typev3.StatusCode_Unauthorized},
-							Headers: &extprocv3.HeaderMutation{
-								SetHeaders: []*corev3.HeaderValueOption{
-									{Header: &corev3.HeaderValue{
-										Key:      "content-type",
-										RawValue: []byte("application/json"),
-									}},
-								},
-							},
-							Body: `{"error":{"message":"Invalid or missing Gateway API key","type":"authentication_error","code":"invalid_api_key"}}`,
-						},
-					}
-					if err := stream.Send(resp); err != nil {
-						return err
-					}
+				
+				if vk == nil {
+					resp.Response = buildImmediateError(typev3.StatusCode_Unauthorized, "Invalid API key")
+					if stream.Send(resp) != nil { return nil }
 					continue
 				}
 				
-				// Budget check
+				// Model RBAC Check
+				allowed := false
+				for _, m := range vk.AllowedModels {
+					if m == "*" || m == model {
+						allowed = true
+						break
+					}
+				}
+				if !allowed {
+					resp.Response = buildImmediateError(typev3.StatusCode_Forbidden, "Model not allowed for this key")
+					if stream.Send(resp) != nil { return nil }
+					continue
+				}
+
+				// Global Rate Limiting via Redis
+				if s.rdb != nil {
+					rateKey := "rate:" + vk.ID
+					script := `
+						local c = redis.call('INCR', KEYS[1])
+						if c == 1 then
+							redis.call('EXPIRE', KEYS[1], 60)
+						end
+						return c
+					`
+					count, err := s.rdb.Eval(ctx, script, []string{rateKey}).Int()
+					if err == nil {
+						if count > 100 { // 100 req/min
+							resp.Response = buildImmediateError(typev3.StatusCode_TooManyRequests, "Rate limit exceeded")
+							if stream.Send(resp) != nil { return nil }
+							continue
+						}
+					}
+				}
+				
 				vk.mu.RLock()
 				budgetExceeded := vk.Spend >= vk.MonthlyBudget
 				vk.mu.RUnlock()
 				if budgetExceeded {
-					s.logger.Warn("budget exceeded", "request_id", requestID, "virtual_key", vk.ID)
-					resp.Response = &extprocv3.ProcessingResponse_ImmediateResponse{
-						ImmediateResponse: &extprocv3.ImmediateResponse{
-							Status: &typev3.HttpStatus{Code: typev3.StatusCode_TooManyRequests},
-							Headers: &extprocv3.HeaderMutation{
-								SetHeaders: []*corev3.HeaderValueOption{
-									{Header: &corev3.HeaderValue{Key: "content-type", RawValue: []byte("application/json")}},
-								},
-							},
-							Body: `{"error":{"message":"Virtual key budget exceeded","type":"billing_error"}}`,
-						},
-					}
-					if err := stream.Send(resp); err != nil {
-						return err
-					}
+					resp.Response = buildImmediateError(typev3.StatusCode_TooManyRequests, "Budget exceeded")
+					if stream.Send(resp) != nil { return nil }
 					continue
 				}
 			}
 
-			// Check if this request is already a fallback (to avoid redirect loops)
-			isFallback = strings.Contains(path, "fallback=true") ||
-				getHeader(headers, "fallback") == "true" ||
-				getHeader(headers, "x-fallback") == "true"
-
-			// Determine LLM provider based on path and model
+			isFallback = strings.Contains(path, "fallback=true") || getHeader(headers, "fallback") == "true"
 			if isFallback {
-				if strings.Contains(path, "/v1/messages") {
-					provider = "anthropic"
-				} else if strings.Contains(path, "/v1/chat/completions") {
-					provider = "openai"
-				}
+				if strings.Contains(path, "/v1/messages") { provider = "anthropic" } else { provider = "openai" }
 			}
 
 			if provider == "" {
@@ -256,75 +249,36 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 				} else if strings.HasPrefix(modelLower, "claude") {
 					provider = "anthropic"
 				} else {
-					// Fallback default based on path
-					if strings.Contains(path, "/v1/messages") {
-						provider = "anthropic"
-					} else {
-						provider = "openai"
-					}
+					provider = "openai"
 				}
 			}
 
-			s.logger.Info("request routed",
-				"request_id", requestID,
-				"model", model,
-				"provider", provider,
-				"fallback", isFallback,
-				"path", path,
-			)
-
-			// Generate routing and tracing headers
 			var setHeaders []*corev3.HeaderValueOption
 			setHeaders = append(setHeaders, &corev3.HeaderValueOption{
-				Header: &corev3.HeaderValue{
-					Key:      "x-llm-provider",
-					RawValue: []byte(provider),
-				},
+				Header: &corev3.HeaderValue{Key: "x-llm-provider", RawValue: []byte(provider)},
 			})
-
-			// Add request ID header for end-to-end tracing
 			setHeaders = append(setHeaders, &corev3.HeaderValueOption{
-				Header: &corev3.HeaderValue{
-					Key:      "x-request-id",
-					RawValue: []byte(requestID),
-				},
+				Header: &corev3.HeaderValue{Key: "x-request-id", RawValue: []byte(requestID)},
 			})
 
-			// Inject real provider API key from central vault
-			var providerKey string
-			if provider == "openai" {
-				providerKey = os.Getenv("OPENAI_API_KEY")
-			} else if provider == "anthropic" {
-				providerKey = os.Getenv("ANTHROPIC_API_KEY")
-			}
-			
+			providerKey := ""
+			if provider == "openai" { providerKey = os.Getenv("OPENAI_API_KEY") } else if provider == "anthropic" { providerKey = os.Getenv("ANTHROPIC_API_KEY") }
 			if providerKey != "" {
-				s.logger.Info("injecting provider key", "provider", provider, "key_prefix", providerKey[:min(10, len(providerKey))])
 				setHeaders = append(setHeaders, &corev3.HeaderValueOption{
-					Header: &corev3.HeaderValue{
-						Key:      "authorization",
-						RawValue: []byte("Bearer " + providerKey),
-					},
+					Header: &corev3.HeaderValue{Key: "authorization", RawValue: []byte("Bearer " + providerKey)},
 				})
-			} else {
-				s.logger.Warn("no provider key found to inject", "provider", provider)
 			}
 
-			// Override x-model header to fallback-friendly default if mismatched
 			modelLower := strings.ToLower(model)
 			if provider == "anthropic" && !strings.HasPrefix(modelLower, "claude") {
+				model = "claude-3-5-sonnet"
 				setHeaders = append(setHeaders, &corev3.HeaderValueOption{
-					Header: &corev3.HeaderValue{
-						Key:      "x-model",
-						RawValue: []byte("claude-3-5-sonnet"),
-					},
+					Header: &corev3.HeaderValue{Key: "x-model", RawValue: []byte("claude-3-5-sonnet")},
 				})
 			} else if provider == "openai" && !strings.HasPrefix(modelLower, "gpt") && !strings.HasPrefix(modelLower, "o1") {
+				model = "gpt-4o"
 				setHeaders = append(setHeaders, &corev3.HeaderValueOption{
-					Header: &corev3.HeaderValue{
-						Key:      "x-model",
-						RawValue: []byte("gpt-4o"),
-					},
+					Header: &corev3.HeaderValue{Key: "x-model", RawValue: []byte("gpt-4o")},
 				})
 			}
 
@@ -332,211 +286,181 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 				RequestHeaders: &extprocv3.HeadersResponse{
 					Response: &extprocv3.CommonResponse{
 						Status:         extprocv3.CommonResponse_CONTINUE,
-						HeaderMutation: &extprocv3.HeaderMutation{
-							SetHeaders: setHeaders,
-						},
+						HeaderMutation: &extprocv3.HeaderMutation{SetHeaders: setHeaders},
 						ClearRouteCache: true,
 					},
 				},
 			}
 
+		case *extprocv3.ProcessingRequest_RequestBody:
+			body := msg.RequestBody.Body
+			
+			// Semantic Caching Check
+			if s.rdb != nil {
+				hash := fmt.Sprintf("%x", sha256.Sum256(body))
+				cacheKey = "cache:" + provider + ":" + model + ":" + hash
+				cachedResp, err := s.rdb.Get(ctx, cacheKey).Result()
+				if err == nil && cachedResp != "" {
+					s.logger.Info("cache hit", "request_id", requestID, "hash", hash)
+					resp.Response = &extprocv3.ProcessingResponse_ImmediateResponse{
+						ImmediateResponse: &extprocv3.ImmediateResponse{
+							Status: &typev3.HttpStatus{Code: typev3.StatusCode_OK},
+							Headers: &extprocv3.HeaderMutation{
+								SetHeaders: []*corev3.HeaderValueOption{
+									{Header: &corev3.HeaderValue{Key: "content-type", RawValue: []byte("application/json")}},
+									{Header: &corev3.HeaderValue{Key: "x-cache", RawValue: []byte("HIT")}},
+								},
+							},
+							Body: cachedResp,
+						},
+					}
+					if err := stream.Send(resp); err != nil { return err }
+					continue
+				}
+			}
+
+			// DLP Scrubbing
+			bodyStr := string(body)
+			if ssnRegex.MatchString(bodyStr) || ccRegex.MatchString(bodyStr) {
+				bodyStr = ssnRegex.ReplaceAllString(bodyStr, "[REDACTED SSN]")
+				bodyStr = ccRegex.ReplaceAllString(bodyStr, "[REDACTED CC]")
+				s.logger.Info("DLP redaction applied", "request_id", requestID)
+				body = []byte(bodyStr)
+			}
+
+			// Translate
+			if provider == "anthropic" && strings.Contains(originalPath, "/v1/chat/completions") {
+				translated, err := TranslateOpenAIToAnthropic(body)
+				if err == nil && translated != nil { body = translated }
+			}
+			if provider == "openai" && strings.Contains(originalPath, "/v1/messages") {
+				translated, err := TranslateAnthropicToOpenAI(body)
+				if err == nil && translated != nil { body = translated }
+			}
+
+			resp.Response = &extprocv3.ProcessingResponse_RequestBody{
+				RequestBody: &extprocv3.BodyResponse{
+					Response: &extprocv3.CommonResponse{
+						Status: extprocv3.CommonResponse_CONTINUE_AND_REPLACE,
+						BodyMutation: &extprocv3.BodyMutation{
+							Mutation: &extprocv3.BodyMutation_Body{Body: body},
+						},
+					},
+				},
+			}
+
 		case *extprocv3.ProcessingRequest_ResponseHeaders:
-			var headers []*corev3.HeaderValue
-			if msg.ResponseHeaders != nil && msg.ResponseHeaders.Headers != nil {
-				headers = msg.ResponseHeaders.Headers.Headers
-			}
-
-			statusStr := getHeader(headers, ":status")
-			statusCode := 0
-			if statusStr != "" {
-				statusCode, _ = strconv.Atoi(statusStr)
-			}
-
-			latencyMs := time.Since(startTime).Milliseconds()
-
-			var setHeaders []*corev3.HeaderValueOption
-
-			// Intercept 5xx errors to redirect client to fallback provider
+			headers := msg.ResponseHeaders.Headers.Headers
+			statusCode, _ := strconv.Atoi(getHeader(headers, ":status"))
+			
 			if statusCode >= 500 && statusCode <= 599 && !isFallback {
 				redirectURL := ""
-				if provider == "openai" {
-					redirectURL = "/v1/messages?fallback=true"
-				} else if provider == "anthropic" {
-					redirectURL = "/v1/chat/completions?fallback=true"
-				}
-
+				if provider == "openai" { redirectURL = "/v1/messages?fallback=true" }
+				if provider == "anthropic" { redirectURL = "/v1/chat/completions?fallback=true" }
 				if redirectURL != "" {
-					s.logger.Warn("upstream failure, triggering fallback",
-						"request_id", requestID,
-						"provider", provider,
-						"status_code", statusCode,
-						"latency_ms", latencyMs,
-					)
-
-					setHeaders = append(setHeaders, &corev3.HeaderValueOption{
-						Header: &corev3.HeaderValue{
-							Key:      ":status",
-							RawValue: []byte("307"),
+					resp.Response = &extprocv3.ProcessingResponse_ImmediateResponse{
+						ImmediateResponse: &extprocv3.ImmediateResponse{
+							Status: &typev3.HttpStatus{Code: typev3.StatusCode_TemporaryRedirect},
+							Headers: &extprocv3.HeaderMutation{
+								SetHeaders: []*corev3.HeaderValueOption{
+									{Header: &corev3.HeaderValue{Key: "location", RawValue: []byte(redirectURL)}},
+								},
+							},
+							Body: "",
 						},
-					}, &corev3.HeaderValueOption{
-						Header: &corev3.HeaderValue{
-							Key:      "location",
-							RawValue: []byte(redirectURL),
-						},
-					})
+					}
+					if err := stream.Send(resp); err != nil { return err }
+					continue
 				}
-			} else {
-				s.logger.Info("response completed",
-					"request_id", requestID,
-					"provider", provider,
-					"status_code", statusCode,
-					"fallback", isFallback,
-					"latency_ms", latencyMs,
-				)
 			}
 
 			resp.Response = &extprocv3.ProcessingResponse_ResponseHeaders{
 				ResponseHeaders: &extprocv3.HeadersResponse{
 					Response: &extprocv3.CommonResponse{
 						Status: extprocv3.CommonResponse_CONTINUE,
-						HeaderMutation: &extprocv3.HeaderMutation{
-							SetHeaders: setHeaders,
-						},
 					},
 				},
-			}
-
-		case *extprocv3.ProcessingRequest_RequestBody:
-			// Default to no mutation
-			resp.Response = &extprocv3.ProcessingResponse_RequestBody{
-				RequestBody: &extprocv3.BodyResponse{
-					Response: &extprocv3.CommonResponse{
-						Status: extprocv3.CommonResponse_CONTINUE,
-					},
-				},
-			}
-
-			// Translate OpenAI to Anthropic: client requested OpenAI but routed to Anthropic
-			if provider == "anthropic" && strings.Contains(originalPath, "/v1/chat/completions") {
-				translated, err := TranslateOpenAIToAnthropic(msg.RequestBody.Body)
-				if err == nil && translated != nil {
-					s.logger.Info("translated request body from OpenAI to Anthropic", "request_id", requestID)
-					resp.Response = &extprocv3.ProcessingResponse_RequestBody{
-						RequestBody: &extprocv3.BodyResponse{
-							Response: &extprocv3.CommonResponse{
-								Status: extprocv3.CommonResponse_CONTINUE_AND_REPLACE,
-								BodyMutation: &extprocv3.BodyMutation{
-									Mutation: &extprocv3.BodyMutation_Body{
-										Body: translated,
-									},
-								},
-							},
-						},
-					}
-				}
-			}
-
-			// Translate Anthropic to OpenAI: client requested Anthropic but routed to OpenAI
-			if provider == "openai" && strings.Contains(originalPath, "/v1/messages") {
-				translated, err := TranslateAnthropicToOpenAI(msg.RequestBody.Body)
-				if err == nil && translated != nil {
-					s.logger.Info("translated request body from Anthropic to OpenAI", "request_id", requestID)
-					resp.Response = &extprocv3.ProcessingResponse_RequestBody{
-						RequestBody: &extprocv3.BodyResponse{
-							Response: &extprocv3.CommonResponse{
-								Status: extprocv3.CommonResponse_CONTINUE_AND_REPLACE,
-								BodyMutation: &extprocv3.BodyMutation{
-									Mutation: &extprocv3.BodyMutation_Body{
-										Body: translated,
-									},
-								},
-							},
-						},
-					}
-				}
 			}
 
 		case *extprocv3.ProcessingRequest_ResponseBody:
 			resp.Response = &extprocv3.ProcessingResponse_ResponseBody{
 				ResponseBody: &extprocv3.BodyResponse{
-					Response: &extprocv3.CommonResponse{
-						Status: extprocv3.CommonResponse_CONTINUE,
-					},
+					Response: &extprocv3.CommonResponse{Status: extprocv3.CommonResponse_CONTINUE},
 				},
 			}
 
 			if vk != nil && len(msg.ResponseBody.Body) > 0 {
-				var promptTokens, completionTokens int
+				if cacheKey != "" && s.rdb != nil {
+					s.rdb.Set(ctx, cacheKey, msg.ResponseBody.Body, time.Hour)
+				}
 				
-				// Try parsing as OpenAI response first
+				var promptTokens, completionTokens int
 				var oi OpenAIResponseUsage
 				if err := json.Unmarshal(msg.ResponseBody.Body, &oi); err == nil && oi.Usage.TotalTokens > 0 {
 					promptTokens = oi.Usage.PromptTokens
 					completionTokens = oi.Usage.CompletionTokens
 				} else {
-					// Try parsing as Anthropic response
 					var anth AnthropicResponseUsage
 					if err := json.Unmarshal(msg.ResponseBody.Body, &anth); err == nil && (anth.Usage.InputTokens > 0 || anth.Usage.OutputTokens > 0) {
 						promptTokens = anth.Usage.InputTokens
 						completionTokens = anth.Usage.OutputTokens
+					} else {
+						// Fallback: Check for SSE stream data
+						lines := strings.Split(string(msg.ResponseBody.Body), "\n")
+						for _, line := range lines {
+							line = strings.TrimSpace(line)
+							if strings.HasPrefix(line, "data: ") {
+								dataJSON := strings.TrimPrefix(line, "data: ")
+								if dataJSON == "[DONE]" { continue }
+								var sseMap map[string]interface{}
+								if json.Unmarshal([]byte(dataJSON), &sseMap) == nil {
+									if usage, ok := sseMap["usage"].(map[string]interface{}); ok {
+										if pt, ok := usage["prompt_tokens"].(float64); ok { promptTokens = int(pt) }
+										if ct, ok := usage["completion_tokens"].(float64); ok { completionTokens = int(ct) }
+									}
+								}
+							}
+						}
 					}
 				}
 
 				if promptTokens > 0 || completionTokens > 0 {
-					// Calculate cost
 					pricing, exists := pricingMap[strings.ToLower(model)]
-					if !exists {
-						// Safe default fallback pricing ($10/1M prompt, $30/1M completion)
-						pricing = ModelPricing{InputCostPerMillion: 10.0, OutputCostPerMillion: 30.0}
-					}
-					
+					if !exists { pricing = ModelPricing{InputCostPerMillion: 10.0, OutputCostPerMillion: 30.0} }
 					cost := (float64(promptTokens) * pricing.InputCostPerMillion / 1000000.0) +
 						(float64(completionTokens) * pricing.OutputCostPerMillion / 1000000.0)
-					
 					vk.AddSpend(cost)
-					vk.mu.RLock()
-					currentSpend := vk.Spend
-					vk.mu.RUnlock()
-					
-					s.logger.Info("updated virtual key spend",
-						"request_id", requestID,
-						"virtual_key", vk.ID,
-						"prompt_tokens", promptTokens,
-						"completion_tokens", completionTokens,
-						"added_cost", cost,
-						"total_spend", currentSpend,
-					)
 				}
 			}
 
 		case *extprocv3.ProcessingRequest_RequestTrailers:
-			resp.Response = &extprocv3.ProcessingResponse_RequestTrailers{
-				RequestTrailers: &extprocv3.TrailersResponse{},
-			}
-
+			resp.Response = &extprocv3.ProcessingResponse_RequestTrailers{RequestTrailers: &extprocv3.TrailersResponse{}}
 		case *extprocv3.ProcessingRequest_ResponseTrailers:
-			resp.Response = &extprocv3.ProcessingResponse_ResponseTrailers{
-				ResponseTrailers: &extprocv3.TrailersResponse{},
-			}
+			resp.Response = &extprocv3.ProcessingResponse_ResponseTrailers{ResponseTrailers: &extprocv3.TrailersResponse{}}
 		}
 
-		if err := stream.Send(resp); err != nil {
-			return err
-		}
+		if err := stream.Send(resp); err != nil { return err }
 	}
 }
 
-// getHeader finds the value of a header key case-insensitively.
 func getHeader(headers []*corev3.HeaderValue, name string) string {
 	for _, h := range headers {
 		if h != nil && strings.ToLower(h.Key) == strings.ToLower(name) {
-			if h.Value != "" {
-				return h.Value
-			}
-			if len(h.RawValue) > 0 {
-				return string(h.RawValue)
-			}
+			if h.Value != "" { return h.Value }
+			if len(h.RawValue) > 0 { return string(h.RawValue) }
 		}
 	}
 	return ""
+}
+
+func buildImmediateError(code typev3.StatusCode, msg string) *extprocv3.ProcessingResponse_ImmediateResponse {
+	return &extprocv3.ProcessingResponse_ImmediateResponse{
+		ImmediateResponse: &extprocv3.ImmediateResponse{
+			Status: &typev3.HttpStatus{Code: code},
+			Headers: &extprocv3.HeaderMutation{
+				SetHeaders: []*corev3.HeaderValueOption{{Header: &corev3.HeaderValue{Key: "content-type", RawValue: []byte("application/json")}}},
+			},
+			Body: `{"error":{"message":"` + msg + `"}}`,
+		},
+	}
 }

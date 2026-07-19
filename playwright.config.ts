@@ -6,19 +6,21 @@ export default defineConfig({
   expect: {
     timeout: 5000,
   },
-  fullyParallel: false,
+  fullyParallel: true,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 2 : 0,
-  workers: 1,
+  workers: 4,
   reporter: [
     ['html', { open: 'never' }],
     ['list']
   ],
   use: {
-    baseURL: process.env.GATEWAY_URL || 'http://localhost:8080',
+    baseURL: process.env.GATEWAY_URL || 'https://localhost:8080',
     extraHTTPHeaders: {
       'Content-Type': 'application/json',
+      'Authorization': 'Bearer local-test-key',
     },
     trace: 'on-first-retry',
+    ignoreHTTPSErrors: true,
   },
 });

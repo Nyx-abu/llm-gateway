@@ -29,7 +29,7 @@
 
 ## About
 
-`llm-gateway` is a production-grade API gateway for LLM traffic.
+`llm-gateway` is a production-grade API gateway for LLM traffic. It is designed to be lightweight, fast, and easy to deploy.
 
 You send one request to the gateway. The gateway looks at the model you asked for, authenticates your API key, decides which provider should handle it, sends the request there, and can fall back to the other provider if the first one fails — all transparently.
 
